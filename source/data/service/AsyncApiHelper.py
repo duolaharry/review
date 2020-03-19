@@ -551,7 +551,7 @@ class AsyncApiHelper:
                 commit2Nodes.append(node2)
                 node2.willFetch = True
 
-                completeFetch = False
+                completeFetch = 0
                 while loop < configPraser.getCommitFetchLoop():
 
                     loop += 1
@@ -560,7 +560,11 @@ class AsyncApiHelper:
                     printNodes(commit1Nodes, commit2Nodes)
 
                     if isNodesContains(commit1Nodes, commit2Nodes):
-                        completeFetch = True
+                        completeFetch = 2
+                        break
+
+                    if isNodesContains(commit2Nodes, commit1Nodes):
+                        completeFetch = 1
                         break
 
                     await fetNotFetchedNodes(commit2Nodes, mysql, session)
@@ -568,7 +572,10 @@ class AsyncApiHelper:
                     printNodes(commit1Nodes, commit2Nodes)
 
                     if isNodesContains(commit1Nodes, commit2Nodes):
-                        completeFetch = True
+                        completeFetch = 2
+                        break
+                    if isNodesContains(commit2Nodes, commit1Nodes):
+                        completeFetch = 1
                         break
 
                     await fetNotFetchedNodes(commit1Nodes, mysql, session)
@@ -576,8 +583,13 @@ class AsyncApiHelper:
                     print("loop:", loop, " 3")
                     printNodes(commit1Nodes, commit2Nodes)
 
-                if not completeFetch:
+                if completeFetch == 0:
                     raise Exception('out of the loop !')
+
+                """找出两组不同的node进行比较"""
+
+                """被包含的那里开始行走测试 找出两者差异的点  并筛选出一些特殊情况做舍弃"""
+
 
     @staticmethod
     async def getCommitsFromStore(oids, mysql):
