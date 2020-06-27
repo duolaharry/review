@@ -15,6 +15,7 @@ from source.data.bean.Commit import Commit
 from source.data.bean.CommitPRRelation import CommitPRRelation
 from source.data.bean.File import File
 from source.data.bean.IssueComment import IssueComment
+from source.data.bean.PRTimeLine import PRTimeLine
 from source.data.bean.PRTimeLineRelation import PRTimeLineRelation
 from source.data.bean.PullRequest import PullRequest
 from source.data.bean.Review import Review
@@ -25,7 +26,9 @@ from source.data.service.GraphqlHelper import GraphqlHelper
 from source.data.service.PRTimeLineUtils import PRTimeLineUtils
 from source.data.service.ProxyHelper import ProxyHelper
 from source.data.service.TextCompareUtils import TextCompareUtils
+from source.utils.Logger import Logger
 from source.utils.StringKeyUtils import StringKeyUtils
+from operator import itemgetter, attrgetter
 
 
 class AsyncApiHelper:
@@ -454,43 +457,44 @@ class AsyncApiHelper:
     @staticmethod
     async def parserPRItemLine(resultJson):
         try:
-            if not AsyncApiHelper.judgeNotFind(resultJson):
-                res, items = PRTimeLineRelation.parser.parser(resultJson)
-                return res, items
+            if AsyncApiHelper.judgeNotFind(resultJson):
+                raise Exception("not found")
+
+            """处理异常情况"""
+            if not isinstance(resultJson, dict):
+                return None
+            data = resultJson.get(StringKeyUtils.STR_KEY_DATA, None)
+            if data is None or not isinstance(data, dict):
+                return None
+            nodes = data.get(StringKeyUtils.STR_KEY_NODE, None)
+            if nodes is None:
+                return None
+
+            """开始解析"""
+            pr_timeline = PRTimeLine.Parser.parser(resultJson)
+            return pr_timeline
         except Exception as e:
             print(e)
 
     @staticmethod
-    async def downloadRPTimeLine(nodeIds, semaphore, mysql, statistic):
+    async def downloadRPTimeLine(node_id, semaphore, mysql, statistic):
         async with semaphore:
             async with aiohttp.ClientSession() as session:
                 try:
-                    args = {"ids": nodeIds}
-                    """从GitHub v4 API 中获取 某个pull-request的TimeLine对象"""
+                    args = {"id": node_id}
+                    """从GitHub v4 API 中获取某个pull-request的TimeLine对象"""
                     api = AsyncApiHelper.getGraphQLApi()
                     resultJson = await AsyncApiHelper.postGraphqlData(session, api, args)
-                    beanList = []
-                    print(type(resultJson))
-                    print("post json:", resultJson)
-                    """从回应结果解析 timeLineItems 和 Relations"""
-                    timeLineRelations, timeLineItems = await  AsyncApiHelper.parserPRItemLine(resultJson)
-
-                    usefulTimeLineItemCount = 0
-                    usefulTimeLineCount = 0
-
-                    beanList.extend(timeLineRelations)
-                    beanList.extend(timeLineItems)
+                    print("timeline json:", resultJson)
+                    """从回应结果解析出pr时间线对象"""
+                    prTimeLine = await AsyncApiHelper.parserPRItemLine(resultJson)
+                    prTimeLineItems = prTimeLine.timeline_items
                     """存储数据库中"""
-                    await AsyncSqlHelper.storeBeanDateList(beanList, mysql)
-
-                    """完善获取关联的commit 信息"""
-                    pairs = PRTimeLineUtils.splitTimeLine(timeLineRelations)
-                    for pair in pairs:
-                        print(pair)
-                        """依照每一对review和后面关联的commit来判断这个reivew中comment的有效性"""
-                        """completeCommitInformation 这个函数名取得不好"""
-                        await AsyncApiHelper.completeCommitInformation(pair, mysql, session, statistic)
-
+                    try:
+                        await AsyncSqlHelper.storeBeanDateList(prTimeLineItems, mysql)
+                    except Exception as e:
+                        Logger.loge(e)
+                        Logger.loge("this pr's timeline: {0} fail to insert".format(node_id))
                     # 做了同步处理
                     statistic.lock.acquire()
                     statistic.usefulTimeLineCount += 1
@@ -499,331 +503,329 @@ class AsyncApiHelper:
                           f" twoParents case:{statistic.twoParentsNodeCase}",
                           f" outOfLoop case:{statistic.outOfLoopCase}")
                     statistic.lock.release()
+                    return prTimeLine
                 except Exception as e:
                     print(e)
 
     @staticmethod
-    async def completeCommitInformation(pair, mysql, session, statistic):
-        """完善 review和随后事件相关的commit"""
-        """依照commit来判断review中comment的有效性"""
+    async def analyzeReviewChangeTrigger(pair, mysql, statistic):
+        """分析review和随后的changes是否有trigger关系"""
+        """目前算法暂时先不考虑comment的change_trigger，只考虑文件层面"""
+        """算法说明：  通过reviewCommit和changeCommit来比较两者之间的代码差异"""
+        """大体思路:   reviewCommit和它的祖宗节点组成一个commit的集合reviewGroup
+                      changeCommit同样组成了changeGroup
+
+                      在Group中每一个commit点都有以下信息：
+                      1. oid (commit-sha)
+                      2. 父节点的 oid
+                      3. 这个commit涉及的文件改动
+
+                      Group中包含两种类型节点，一种是信息已经获取，还有一种是信息尚未获取。
+                      信息已经获取代表了这个commit上面三个信息都知道，而未获取代表了这个commit
+                      只有oid信息。
+
+                      Group一次迭代是指，每次获取类型为未获取信息的commit点，并将这些点加入Group中，
+                      commit指向的父节点也作为未获取信息节点加入Group中。
+
+                      两个commit作为起点不断做迭代操作，直到某个Group中未获取信息的点集合包含在了
+                      另外一个Group的总体节点中
+
+                      迭代结束之后分别找到两个Group差异的commit点集合，作为后续算法的输入
+        """
+
+        """缺点： 现在算法无法处理commit点有两个父类的情况，如merge操作出现的点
+                  现在算法感觉怪怪的，效率可能不是很高
+                  这个问题应该是LCA问题的变种
+        """
+
+        """算法限制:  1、commit点获取次数越少越好
+                     2、两个commit点版本差异过过大的时候可以检测，并妥善处理 
+        """
+
+        """commit node工具类"""
+        class CommitNode:
+            willFetch = None
+            oid = None
+            parents = None  # [sha1, sha2 ...]
+
+            def __init__(self, will_fetch=True, oid=None, parents=None):
+                self.willFetch = will_fetch
+                self.oid = oid
+                self.parents = parents
+
+        """node group工具方法start"""
+        def findNodes(nodes, oid):
+            for node in nodes:
+                if node.oid == oid:
+                    return node
+
+        def isExist(nodes, oid):
+            for node in nodes:
+                if node.oid == oid:
+                    return True
+            return False
+
+        def isNodesContains(nodes1, nodes2):
+            """nodes2所有未探索的点是否被nodes1包含"""
+            isContain = True
+            for node in nodes2:
+                isFind = False
+                for node1 in nodes1:
+                    if node1.oid == node.oid:
+                        isFind = True
+                        break
+                if not isFind and node.willFetch:
+                    isContain = False
+                    break
+            return isContain
+
+        def printNodes(nodes1, nodes2):
+            print('node1')
+            for node in nodes1:
+                print(node.oid, node.willFetch, node.parents)
+            print('node2')
+            for node in nodes2:
+                print(node.oid, node.willFetch, node.parents)
+
+        async def fetNotFetchedNodes(nodes, mysql):
+            async with aiohttp.ClientSession() as session:
+                """获取commit点信息 包括数据库获取的GitHub API获取 nodes就是一个Group"""
+                needFetchList = [node.oid for node in nodes if node.willFetch]
+                """先尝试从数据库中读取"""
+                localExistList, localRelationList = await AsyncApiHelper.getCommitsFromStore(needFetchList, mysql)
+                needFetchList = [oid for oid in needFetchList if oid not in localExistList]
+                print("need fetch list:", needFetchList)
+                webRelationList = await AsyncApiHelper.getCommitsFromApi(needFetchList, mysql, session)
+
+                for node in nodes:
+                    node.willFetch = False
+
+                relationList = []
+                relationList.extend(localRelationList)
+                relationList.extend(webRelationList)
+
+                """原有的node 补全parents"""
+                for relation in relationList:
+                    node = findNodes(nodes, relation.child)
+                    if node is not None:
+                        if relation.parent not in node.parents:
+                            node.parents.append(relation.parent)
+
+                addNode = []
+                for relation in relationList:
+                    isFind = False
+                    """确保在两个地方都不存在"""
+                    for node in nodes:
+                        if relation.parent == node.oid:
+                            isFind = True
+                            break
+                    for node in addNode:
+                        if relation.parent == node.oid:
+                            isFind = True
+                            break
+
+                    if not isFind:
+                        """新加入为获取的点"""
+                        newNode = CommitNode(will_fetch=True, oid=relation.parent, parents=[])
+                        addNode.append(newNode)
+                nodes.extend(addNode)
+                return nodes
+        """node group工具方法end"""
+
         review = pair[0]
         changes = pair[1]
 
-        """review 的 comments 获取一次即可"""
+        isUsefulReview = False
 
-        """获得review comments"""
-        """一个review 可能会关联多个comment  
-        每个comment会指定一个文件和对应代码行"""
-        comments = await AsyncApiHelper.getReviewCommentsByNodeFromStore(review.timelineitem_node, mysql)
+        """从数据库获取review comments(注：一个review 可能会关联多个comment，每个comment会指定一个文件和对应代码行)"""
+        comments = await AsyncApiHelper.getReviewCommentsByNodeFromStore(review.timeline_item_node, mysql)
+        if comments is None:
+            return isUsefulReview
 
         twoParentsBadCase = 0  # 记录一个commit有两个根节点的情况 发现这个情况直接停止
         outOfLoopCase = 0  # 记录寻找两个commit点的最近祖宗节点 使用上级追溯的次数超过限制情况
 
-        """changes 代指review后面关联的commit 依次就changeTrigger的情况进行判断"""
+        """遍历review之后的changes，判断是否有comment引起change的情况"""
         for change in changes:  # 对后面连续改动依次遍历
-            """通过commit1和commit2 来比较两者之间的代码差异"""
-            """commit1 : review的涉及的commit
-               commit2 : reivew后面作者改动的commit
-            """
-            commit1 = review.pullrequestReviewCommit
-            commit2 = None
+            reviewCommit = review.pullrequestReviewCommit
+            changeCommit = None
             if change.typename == StringKeyUtils.STR_KEY_PULL_REQUEST_COMMIT:
-                commit2 = change.pullrequestCommitCommit
+                changeCommit = change.pullrequestCommitCommit
             elif change.typename == StringKeyUtils.STR_KEY_HEAD_REF_PUSHED_EVENT:
-                commit2 = change.headRefForcePushedEventAfterCommit
+                changeCommit = change.headRefForcePushedEventAfterCommit
 
-            """后面算法就是  通过commit1和commit2 来比较两者之间的代码差异"""
-            """大体思路：  commit1和它的祖宗节点组成一个commit的集合Group1
-                          commit2同样组成了Group2
-                          
-                          在Group中每一个commit点都有以下信息：
-                          1. oid (commit-sha)
-                          2. 父节点的 oid
-                          3. 这个commit涉及的文件改动
-                          
-                          Group中包含两种类型节点，一种是信息已经获取，还有一种是信息尚未获取。
-                          信息已经获取代表了这个commit上面三个信息都知道，而未获取代表了这个commit
-                          只有oid信息。
-                          
-                          Group一次迭代是指，每次获取类型为为获取信息的commit点，点作为获取信息的节点
-                          加入Group中，而commit指向的父节点作为未获取信息节点加入Group中。
-                          
-                          两个commit作为起点不断做迭代操作，直到某个Group中未包含的点集合包含在了
-                          另外一个Group的总体节点中
-                          
-                          迭代结束之后分别找到两个Group独特的commit点集合，作为后续算法的输入
-            """
+            if changeCommit is None or reviewCommit is None:
+                break
+            try:
+                # TODO 后续研究如何直接比较两个commit的版本差异
+                """两个Group的迭代过程"""
+                reviewGroup = []
+                changeGroup = []
 
-            """缺点： 现在算法无法处理commit点有两个父类的情况，如merge操作出现的点
-                      现在算法感觉怪怪的，效率可能不是很高
-                      
-                      这个问题应该是LCA问题的变种
-            """
+                reviewGroupStartNode = CommitNode(oid=reviewCommit, parents=[])
+                reviewGroup.append(reviewGroupStartNode)
+                changeGroupStartNode = CommitNode(oid=changeCommit, parents=[])
+                changeGroup.append(changeGroupStartNode)
 
-            """算法限制： 1、commit点获取次数越少越好
-                         2、两个commit点版本差异过过大的时候可以检测，并妥善处理 
-            """
+                # 已全部Fetch的group
+                completeFetch = None
+                loop = 0
+                while loop < configPraser.getCommitFetchLoop():
+                    """迭代次数有限制"""
+                    loop += 1
+                    print("fetch nodes loop: ", loop)
+                    printNodes(reviewGroup, changeGroup)
 
-            loop = 0
-            if commit2 is not None and commit1 is not None:
+                    """判断包含关系，先拉取changeGroup"""
+                    if isNodesContains(reviewGroup, changeGroup):
+                        completeFetch = 'CHANGE_GROUP'
+                        break
+                    if isNodesContains(changeGroup, reviewGroup):
+                        completeFetch = 'REVIEW_GROUP'
+                        break
+                    await fetNotFetchedNodes(changeGroup, mysql)
 
-                class CommitNode:
-                    willFetch = None
-                    oid = None
-                    parents = None  # [sha1, sha2 ...]
+                    """判断包含关系，再拉取changeGroup"""
+                    printNodes(reviewGroup, changeGroup)
+                    if isNodesContains(reviewGroup, changeGroup):
+                        completeFetch = 'CHANGE_GROUP'
+                        break
+                    if isNodesContains(changeGroup, reviewGroup):
+                        completeFetch = 'REVIEW_GROUP'
+                        break
+                    await fetNotFetchedNodes(reviewGroup, mysql)
 
-                """为了统计使用的工具类"""
+                if completeFetch is None:
+                    outOfLoopCase += 1
+                    raise Exception('out of the loop !')
 
-                def findNodes(nodes, oid):
-                    for node in nodes:
-                        if node.oid == oid:
-                            return node
+                """找出两组不同的node进行比较"""
 
-                def isExist(nodes, oid):
-                    for node in nodes:
-                        if node.oid == oid:
-                            return True
-                    return False
+                """被包含的那里开始行走测试 找出两者差异的点  并筛选出一些特殊情况做舍弃"""
 
-                def isNodesContains(nodes1, nodes2):  # nodes2 的所有未探索的点被nodes1 包含
-                    isContain = True
-                    for node in nodes2:
-                        isFind = False
-                        for node1 in nodes1:
-                            if node1.oid == node.oid:
-                                isFind = True
-                                break
-                        if not isFind and node.willFetch:
-                            isContain = False
-                            break
-                    return isContain
+                # 范围较大的group
+                groupInclude = None
+                groupIncludeStartNode = None
+                # 被包含的group
+                groupIncluded = None
+                groupIncludedStartNode = None
 
-                def printNodes(nodes1, nodes2):
-                    print('node1')
-                    for node in nodes1:
-                        print(node.oid, node.willFetch, node.parents)
-                    print('node2')
-                    for node in nodes2:
-                        print(node.oid, node.willFetch, node.parents)
+                """依据包含关系 确认包含和被包含对象"""
+                if completeFetch == 'CHANGE_GROUP':
+                    groupInclude = reviewGroup
+                    groupIncluded = changeGroup  # 2号位为被包含
+                    groupIncludeStartNode = reviewGroupStartNode.oid
+                    groupIncludedStartNode = changeGroupStartNode.oid
+                if completeFetch == 'REVIEW_GROUP':
+                    groupInclude = changeGroup
+                    groupIncluded = reviewGroup
+                    groupIncludeStartNode = changeGroupStartNode.oid
+                    groupIncludedStartNode = reviewGroupStartNode.oid
 
-                async def fetNotFetchedNodes(nodes, mysql, session):
-                    """获取commit点信息 包括数据库获取的GitHub API获取 nodes就是一个Group"""
-                    fetchList = [node.oid for node in nodes if node.willFetch]
-                    """先尝试从数据库中读取"""
-                    localExistList, localRelationList = await AsyncApiHelper.getCommitsFromStore(fetchList, mysql)
-                    fetchList = [oid for oid in fetchList if oid not in localExistList]
-                    # print("res fetch list:", fetchList)
-                    webRelationList = await AsyncApiHelper.getCommitsFromApi(fetchList, mysql, session)
+                # 用于存储两边差集
+                diff_nodes1 = []
+                diff_nodes2 = [x for x in groupIncluded if not findNodes(groupInclude, x.oid)]
 
-                    for node in nodes:
-                        node.willFetch = False
+                # diff_nodes1 先包含所有点，然后找出从2出发到达不了的点
+                diff_nodes1 = groupInclude.copy()
+                for node in groupIncluded:
+                    if not findNodes(groupInclude, node.oid):  # 去除
+                        diff_nodes1.append(node)
 
-                    # for node in nodes:
-                    #     print("after fetched 1: " + f"{node.oid}  {node.willFetch}")
+                temp = [groupIncludedStartNode]
+                while temp.__len__() > 0:
+                    oid = temp.pop(0)
+                    node = findNodes(diff_nodes1, oid)
+                    if node is not None:
+                        temp.extend(node.parents)
+                    diff_nodes1.remove(node)
 
-                    relationList = []
-                    relationList.extend(localRelationList)
-                    relationList.extend(webRelationList)
-                    # print("relationList:", relationList)
-                    # for relation in relationList:
-                    #     print(relation.child, "    ", relation.parent)
+                for node in diff_nodes1:
+                    if node.willFetch:
+                        twoParentsBadCase += 1
+                        raise Exception('will fetch node in set 1 !')  # 去除分叉节点未经之前遍历的情况
 
-                    """原有的node 补全parents"""
-                    for relation in relationList:
-                        node = findNodes(nodes, relation.child)
-                        if node is not None:
-                            if relation.parent not in node.parents:
-                                node.parents.append(relation.parent)
+                """diff_node1 和 diff_node2 分别存储两边的差异点"""
+                printNodes(diff_nodes1, diff_nodes2)
 
-                    addNode = []
-                    for relation in relationList:
-                        isFind = False
-                        """确保在两个地方都不存在"""
-                        for node in nodes:
-                            if relation.parent == node.oid:
-                                isFind = True
-                                break
-                        for node in addNode:
-                            if relation.parent == node.oid:
-                                isFind = True
-                                break
+                """除去差异点中的merge节点"""
+                for node in diff_nodes1:
+                    if node.parents.__len__() >= 2:
+                        twoParentsBadCase += 1
+                        raise Exception('merge node find in set1 !')
+                for node in diff_nodes2:
+                    if node.parents.__len__() >= 2:
+                        twoParentsBadCase += 1
+                        raise Exception('merge node find in set 2!')
+                """获得commit 所有的change file"""
+                file1s = await AsyncApiHelper.getFilesFromStore([x.oid for x in diff_nodes1], mysql)
+                file2s = await AsyncApiHelper.getFilesFromStore([x.oid for x in diff_nodes2], mysql)
 
-                        if not isFind:
-                            """新加入为获取的点"""
-                            newNode = CommitNode()
-                            newNode.willFetch = True
-                            newNode.oid = relation.parent
-                            newNode.parents = []
-                            addNode.append(newNode)
-                    nodes.extend(addNode)
+                for comment in comments:  # 对每一个comment统计change trigger
+                    """comment 对应的文件"""
+                    commentFile = comment.path
+                    # TODO 目前暂不考虑comment细化到行的change_trigger
+                    # """comment 对应的文件行"""
+                    # commentLine = comment.original_line
+                    #
+                    # diff_patch1 = []  # 两边不同的patch patch就是不同文本集合
+                    # diff_patch2 = []
 
-                    # for node in nodes:
-                    #     print("after fetched  2: " + f"{node.oid}  {node.willFetch}")
+                    """只要在改动路径上出现过和commentFile相同的文件，就认定该条comment是有效的"""
+                    startNode = [groupIncludeStartNode]  # 从commit源头找到根中每一个commit的涉及文件名的patch
+                    while startNode.__len__() > 0:
+                        """类似DFS算法"""
+                        node_oid = startNode.pop(0)
+                        for node in diff_nodes1:
+                            if node.oid == node_oid:
+                                for file in file1s:
+                                    if file.filename == commentFile and file.commit_sha == node.oid:
+                                        comment.change_trigger = True
+                                        # TODO 目前暂不考虑comment细化到行的change_trigger
+                                        # """patch是一个含有某些行数变化的文本，需要后面单独的解析"""
+                                        # diff_patch1.insert(0, file.patch)
+                                startNode.extend(node.parents)
 
-                    return nodes
+                    startNode = [groupIncludedStartNode]
+                    while startNode.__len__() > 0:
+                        node_oid = startNode.pop(0)
+                        for node in diff_nodes2:
+                            if node.oid == node_oid:
+                                for file in file2s:
+                                    if file.filename == commentFile and file.commit_sha == node.oid:
+                                        comment.change_trigger = True
+                                        # TODO 目前暂不考虑comment细化到行的change_trigger
+                                        # diff_patch2.insert(0, file.patch)
+                                startNode.extend(node.parents)
 
-                try:
-                    """两个Group的迭代过程"""
-                    commit1Nodes = []
-                    commit2Nodes = []
+                    # TODO 目前暂不考虑comment细化到行的change_trigger
+                    # """通过比较commit集合来计算距离comment最近的文件变化"""
+                    # closedChange = TextCompareUtils.getClosedFileChange(diff_patch1, diff_patch2, commentLine)
+                    # print("closedChange :", closedChange)
+                    # if comment.change_trigger is None:
+                    #     comment.change_trigger = closedChange
+                    # else:
+                    #     comment.change_trigger = min(comment.change_trigger, closedChange)
+                    """找到一个comment有change_trigger，则认定该review有效, 不再继续分析后面的comment"""
+                    if comment.change_trigger:
+                        isUsefulReview = True
+                        break
+            except Exception as e:
+                print(e)
+                continue
 
-                    node1 = CommitNode()
-                    node1.oid = commit1
-                    node1.willFetch = True
-                    node1.parents = []
-                    commit1Nodes.append(node1)
-                    node2 = CommitNode()
-                    node2.oid = commit2
-                    commit2Nodes.append(node2)
-                    node2.willFetch = True
-                    node2.parents = []
+            """若找到一个和comment关联的change，认定该review有效，不再继续找后面的change"""
+            if isUsefulReview:
+                break
 
-                    completeFetch = 0
-                    while loop < configPraser.getCommitFetchLoop():
-                        """迭代次数有限制"""
+        statistic.lock.acquire()
+        statistic.outOfLoopCase += outOfLoopCase
+        statistic.usefulChangeTrigger += [x for x in comments if x.change_trigger is not None].__len__()
+        statistic.lock.release()
 
-                        loop += 1
-
-                        print("loop:", loop, " 1")
-                        printNodes(commit1Nodes, commit2Nodes)
-
-                        if isNodesContains(commit1Nodes, commit2Nodes):
-                            completeFetch = 2
-                            break
-
-                        if isNodesContains(commit2Nodes, commit1Nodes):
-                            completeFetch = 1
-                            break
-
-                        await fetNotFetchedNodes(commit2Nodes, mysql, session)
-                        print("loop:", loop, " 2")
-                        printNodes(commit1Nodes, commit2Nodes)
-
-                        if isNodesContains(commit1Nodes, commit2Nodes):
-                            completeFetch = 2
-                            break
-                        if isNodesContains(commit2Nodes, commit1Nodes):
-                            completeFetch = 1
-                            break
-
-                        await fetNotFetchedNodes(commit1Nodes, mysql, session)
-
-                        print("loop:", loop, " 3")
-                        printNodes(commit1Nodes, commit2Nodes)
-
-                    if completeFetch == 0:
-                        outOfLoopCase += 1
-                        raise Exception('out of the loop !')
-
-                    """找出两组不同的node进行比较"""
-
-                    """被包含的那里开始行走测试 找出两者差异的点  并筛选出一些特殊情况做舍弃"""
-                    finishNodes1 = None
-                    finishNodes2 = None
-                    startNode1 = None
-                    startNode2 = None
-
-                    """依据包含关系 确认1，2位对象"""
-                    if completeFetch == 2:
-                        finishNodes1 = commit1Nodes
-                        finishNodes2 = commit2Nodes  # 2号位为被包含
-                        startNode1 = node1.oid
-                        startNode2 = node2.oid
-                    if completeFetch == 1:
-                        finishNodes1 = commit2Nodes
-                        finishNodes2 = commit1Nodes
-                        startNode1 = node2.oid
-                        startNode2 = node1.oid
-
-                    diff_nodes1 = []  # 用于存储两边不同差异的点
-                    diff_nodes2 = [x for x in finishNodes2 if not findNodes(finishNodes1, x.oid)]
-
-                    # diff_nodes1 先包含所有点，然后找出从2出发到达不了的点
-
-                    diff_nodes1 = finishNodes1.copy()
-                    for node in finishNodes2:
-                        if not findNodes(finishNodes1, node.oid):  # 去除
-                            diff_nodes1.append(node)
-
-                    temp = [startNode2]
-                    while temp.__len__() > 0:
-                        oid = temp.pop(0)
-                        node = findNodes(diff_nodes1, oid)
-                        if node is not None:
-                            temp.extend(node.parents)
-                        diff_nodes1.remove(node)
-
-                    for node in diff_nodes1:
-                        if node.willFetch:
-                            twoParentsBadCase += 1
-                            raise Exception('will fetch node in set 1 !')  # 去除分叉节点未经之前遍历的情况
-
-                    """diff_node1 和 diff_node2 分别存储两边都各异的点"""
-                    printNodes(diff_nodes1, diff_nodes2)
-
-                    """除去特异的点中有merge 节点的存在"""
-                    for node in diff_nodes1:
-                        if node.parents.__len__() >= 2:
-                            twoParentsBadCase += 1
-                            raise Exception('merge node find in set1 !')
-                    for node in diff_nodes2:
-                        if node.parents.__len__() >= 2:
-                            twoParentsBadCase += 1
-                            raise Exception('merge node find in set 2!')
-
-                    if comments is not None:
-
-                        """获得commit 所有的change file"""
-                        file1s = await AsyncApiHelper.getFilesFromStore([x.oid for x in diff_nodes1], mysql)
-                        file2s = await AsyncApiHelper.getFilesFromStore([x.oid for x in diff_nodes2], mysql)
-
-                        for comment in comments:  # 对每一个comment统计change trigger
-                            """comment 对应的文件和文件行"""
-                            commentFile = comment.path
-                            commentLine = comment.original_line
-
-                            diff_patch1 = []  # 两边不同的patch patch就是不同文本集合
-                            diff_patch2 = []
-
-                            startNode = [startNode1]  # 从commit源头找到根中每一个commit的涉及文件名的patch
-                            while startNode.__len__() > 0:
-                                """类似DFS算法"""
-                                node_oid = startNode.pop(0)
-                                for node in diff_nodes1:
-                                    if node.oid == node_oid:
-                                        for file in file1s:
-                                            if file.filename == commentFile and file.commit_sha == node.oid:
-                                                """patch是一个含有某些行数变化的文本，需要后面单独的解析"""
-                                                diff_patch1.insert(0, file.patch)
-                                        startNode.extend(node.parents)
-
-                            startNode = [startNode2]
-                            while startNode.__len__() > 0:
-                                node_oid = startNode.pop(0)
-                                for node in diff_nodes2:
-                                    if node.oid == node_oid:
-                                        for file in file2s:
-                                            if file.filename == commentFile and file.commit_sha == node.oid:
-                                                diff_patch2.insert(0, file.patch)
-                                        startNode.extend(node.parents)
-
-                            """通过比较commit集合来计算距离comment最近的文件变化"""
-                            closedChange = TextCompareUtils.getClosedFileChange(diff_patch1, diff_patch2, commentLine)
-                            print("closedChange :", closedChange)
-                            if comment.change_trigger is None:
-                                comment.change_trigger = closedChange
-                            else:
-                                comment.change_trigger = min(comment.change_trigger, closedChange)
-                except Exception as e:
-                    print(e)
-                    continue
-
-            statistic.lock.acquire()
-            statistic.outOfLoopCase += outOfLoopCase
-            statistic.usefulChangeTrigger += [x for x in comments if x.change_trigger is not None].__len__()
-            statistic.lock.release()
-
-        await AsyncSqlHelper.updateBeanDateList(comments, mysql)
+        # TODO 手动计算comment的original_line和line，和change_trigger一起写到数据库中"""
+        # await AsyncSqlHelper.updateBeanDateList(comments, mysql)
+        return isUsefulReview
 
     @staticmethod
     async def getReviewCommentsByNodeFromStore(node_id, mysql):
@@ -834,7 +836,7 @@ class AsyncApiHelper:
 
         reviews = await AsyncSqlHelper.queryBeanData([review], mysql, [[StringKeyUtils.STR_KEY_NODE_ID]])
         print("reviews:", reviews)
-        if reviews[0].__len__() > 0:
+        if reviews and reviews[0] and reviews[0].__len__() > 0:
             review_id = reviews[0][0][2]
             print("review_id:", review_id)
             comment = ReviewComment()

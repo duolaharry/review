@@ -104,6 +104,7 @@ class StringKeyUtils:
 
     '''commit 可能会使用的数据'''
     STR_KEY_COMMIT = 'commit'
+    STR_KEY_ORIGINAL_COMMIT = 'originalCommit'
     STR_KEY_AUTHOR = 'author'
     STR_KEY_DATE = 'date'
     STR_KEY_AUTHOR_LOGIN = 'author_login'
@@ -152,9 +153,9 @@ class StringKeyUtils:
     STR_KEY_TIME_LINE_ITEMS = 'timelineItems'
     STR_KEY_EDGES = 'edges'
     STR_KEY_OID = 'oid'
+    STR_KEY_COMMENTS = 'comments'
+    STR_KEY_ORIGIN = 'origin'   # timelineItem原始数据
     STR_FAILED_FETCH = 'Failed to fetch'
-
-
 
     '''HeadRefForcePushedEvent 可能会使用到的'''
     STR_KEY_AFTER_COMMIT = 'afterCommit'
@@ -165,11 +166,14 @@ class StringKeyUtils:
     STR_KEY_PULL_REQUEST_COMMIT = 'PullRequestCommit'
 
     '''time line item 可能会碰到的其他类型'''
-    STR_KEY_ISSUE_COMMIT = 'IssueComment'
-    STR_KEY_MENTIONED_EVENT = 'MentionedEvent'
+    STR_KEY_ISSUE_COMMENT = 'IssueComment'
+    STR_KEY_MENTIONED_EVENT = 'MentionedEvent'  # 被提及
+    STR_KEY_SUBSCRIBED_EVENT = 'SubscribedEvent'  # 订阅事件
     STR_KEY_PULL_REQUEST_REVIEW = 'PullRequestReview'
-
-
+    STR_KEY_PULL_REQUEST_REVIEW_THREAD = 'PullRequestReviewThread'  # 相当于review
+    STR_KEY_PULL_REQUEST_REVISION_MARKER = 'PullRequestRevisionMarker'
+    STR_KEY_MERGED_EVENT = 'MergedEvent'
+    STR_KEY_REFERENCED_EVENT = 'ReferencedEvent'    # commit引用，一般在最后merge到主干前做这个动作
 
     API_GITHUB = 'https://api.github.com'
     API_REVIEWS_FOR_PULL_REQUEST = '/repos/:owner/:repo/pulls/:pull_number/reviews'
