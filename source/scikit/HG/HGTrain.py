@@ -21,7 +21,7 @@ class HGTrain:
     """超图建立网络做评审者推荐"""
 
     @staticmethod
-    def TestAlgorithm(project, dates, alpha=0.8, K=20, c=1):
+    def TestAlgorithm(project, dates, alpha=0.8, K=20, c=1, tempMap=None):
         """整合 训练数据"""
         recommendNum = 5  # 推荐数量
         excelName = f'outputHG_{project}_{alpha}_{K}_{c}.xlsx'
@@ -41,7 +41,7 @@ class HGTrain:
             recommendList, answerList, prList, convertDict, trainSize = HGTrain.algorithmBody(date, project,
                                                                                               recommendNum,
                                                                                               alpha=alpha, K=K,
-                                                                                              c=c)
+                                                                                              c=c, tempMap=tempMap)
             """根据推荐列表做评价"""
             topk, mrr, precisionk, recallk, fmeasurek = \
                 DataProcessUtils.judgeRecommend(recommendList, answerList, recommendNum)
@@ -119,7 +119,7 @@ class HGTrain:
         return train_data, train_data_y, test_data, test_data_y, convertDict
 
     @staticmethod
-    def algorithmBody(date, project, recommendNum=5, alpha=0.98, K=20, c=1):
+    def algorithmBody(date, project, recommendNum=5, alpha=0.98, K=20, c=1, tempMap=None):
 
         """提供单个日期和项目名称
            返回推荐列表和答案
@@ -153,7 +153,7 @@ class HGTrain:
 
         recommendList, answerList, authorList = HGTrain.RecommendByHG(train_data, train_data_y, test_data,
                                                           test_data_y, date, project, convertDict, recommendNum=recommendNum,
-                                                          alpha=alpha, K=K, c=c, useLocalPrDis=False)
+                                                          alpha=alpha, K=K, c=c, useLocalPrDis=True,tempMap=tempMap)
 
         """保存推荐结果，用于做统计"""
         DataProcessUtils.saveRecommendList(prList, recommendList, answerList, convertDict, key=project + str(date),
@@ -269,6 +269,8 @@ class HGTrain:
             print("now pr:", index, " all:", prList.__len__())
             for p2 in prList:
                 if p1 < p2:
+                    if p1 == 7960 and p2 == 8296:
+                        print(p1)
                     score = 0
                     if not useLocalPrDis:
                         paths1 = list(pathDict[p1]['filename'])
@@ -284,7 +286,8 @@ class HGTrain:
                         score /= paths1.__len__() * paths2.__len__()
                     else:
                         for i in range(0, 4):
-                            score += disMapList[i][(p1, p2)]
+                            score += disMapList[i][(p1, p2)] / 8
+                        score += disMapList[-1][(p1, p2)] / 2
                     # t1 = list(train_data.loc[train_data['pr_number'] == p1]['pr_created_at'])[0]
                     # t2 = list(train_data.loc[train_data['pr_number'] == p2]['pr_created_at'])[0]
                     # t1 = time.strptime(t1, "%Y-%m-%d %H:%M:%S")
@@ -294,7 +297,8 @@ class HGTrain:
                     t1 = prCreatedTimeMap[p1]
                     t2 = prCreatedTimeMap[p2]
                     t = math.fabs(t1 - t2) / (end_time - start_time)
-                    score = score * math.exp(-t)
+
+                    score = score * math.exp(t-1)
 
                     # TODO 目测计算非常的耗时间， 后面寻找优化的方案
                     scores[p2] = score
@@ -311,7 +315,7 @@ class HGTrain:
 
     @staticmethod
     def RecommendByHG(train_data, train_data_y, test_data, test_data_y, date, project, convertDict, recommendNum=5,
-                      K=20, alpha=0.8, c=1, useLocalPrDis=False):
+                      K=20, alpha=0.8, c=1, useLocalPrDis=False, tempMap=None):
         """基于超图网络推荐算法
            K 超参数：考虑多少邻近的pr
            alpha 超参数： 类似正则参数
@@ -338,7 +342,8 @@ class HGTrain:
         """尝试读取之前计算的结果"""
         disMapList = None
         if useLocalPrDis:
-            disMapList = HGTrain.loadLocalPrDistance(project)
+            # disMapList = HGTrain.loadLocalPrDistance(project)
+            disMapList = tempMap
 
         tempData = train_data[['pr_number', 'filename']].copy(deep=True)
         tempData.drop_duplicates(inplace=True)
@@ -413,14 +418,16 @@ class HGTrain:
                     score /= paths1.__len__() * paths2.__len__()
                 else:
                     for i in range(0, 4):
-                        score += disMapList[i][(pr_num, p1)]
+                        score += disMapList[i][(pr_num, p1)] / 8
+                    score += disMapList[-1][(pr_num, p1)] / 2
                 # t2 = list(train_data.loc[train_data['pr_number'] == p1]['pr_created_at'])[0]
                 # t2 = time.strptime(t2, "%Y-%m-%d %H:%M:%S")
                 # t2 = int(time.mktime(t2))
                 t2 = prCreatedTimeMap[p1]
-                t = (t2 - start_time) / (end_time - start_time)
+                t = math.fabs(t2 - start_time) / (end_time - start_time)
                 # TODO 目测计算非常的耗时间， 后面寻找优化的方案
                 scores[p1] = score * math.exp(t - 1)
+                # scores[p1] = score * t
                 # scores[p1] = score
             """找出K个最近的pr"""
             KNN = [x[0] for x in sorted(scores.items(), key=lambda d: d[1], reverse=True)[0:K]]
@@ -450,8 +457,10 @@ class HGTrain:
                            weight=0.00001, description=f" pr author relation between pr {pr_num} and author {author}",
                            nodeObjects=[node_1, authorNode])
 
+            start_temp_time = datetime.now()
             """重新计算矩阵A"""
             graph.updateMatrix()
+            print("matrix update cost:", datetime.now() - start_temp_time)
 
             """新建查询向量"""
             y = np.zeros((graph.num_nodes, 1))
@@ -550,11 +559,15 @@ class HGTrain:
         prDisDf_LCSubstr = pandasHelper.readTSVFile(projectConfig.getPullRequestDistancePath() + os.sep +
                                                     f"pr_distance_{project}_LCSubstr.tsv",
                                                     header=pandasHelper.INT_READ_FILE_WITH_HEAD)
+        prDisDf_IR = pandasHelper.readTSVFile(projectConfig.getPullRequestDistancePath() + os.sep +
+                                                    f"pr_distance_{project}_IR.tsv",
+                                                    header=pandasHelper.INT_READ_FILE_WITH_HEAD)
 
         DisMapLCP = {}
         DisMapLCS = {}
         DisMapLCSubseq = {}
         DisMapLCSubstr = {}
+        DisMapIR = {}
         for row in prDisDf_LCP.itertuples(index=False, name='Pandas'):
             p1 = row[0]
             p2 = row[1]
@@ -583,7 +596,15 @@ class HGTrain:
             DisMapLCSubstr[(p1, p2)] = dis
             DisMapLCSubstr[(p2, p1)] = dis
 
-        return [DisMapLCS, DisMapLCP, DisMapLCSubseq, DisMapLCSubstr]
+        for row in prDisDf_IR.itertuples(index=False, name='Pandas'):
+            p1 = row[0]
+            p2 = row[1]
+            dis = row[2]
+            DisMapIR[(p1, p2)] = dis
+            DisMapIR[(p2, p1)] = dis
+
+        return [DisMapLCS, DisMapLCP, DisMapLCSubseq, DisMapLCSubstr, DisMapIR]
+        # return [DisMapIR]
 
 
     @staticmethod
@@ -687,4 +708,5 @@ if __name__ == '__main__':
     # dates = [(2017, 1, 2018, 1), (2017, 1, 2018, 2), (2017, 1, 2018, 3), (2017, 1, 2018, 4)]
     projects = ['opencv']
     for p in projects:
-        HGTrain.TestAlgorithm(p, dates, alpha=0.98, K=20, c=0.1)
+        disMapList = HGTrain.loadLocalPrDistance(p)
+        HGTrain.TestAlgorithm(p, dates, alpha=0.98, K=20, c=0.1, tempMap=disMapList)

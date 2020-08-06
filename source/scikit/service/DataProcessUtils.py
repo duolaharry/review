@@ -2427,10 +2427,8 @@ class DataProcessUtils:
         return path.split(sep)
 
     @staticmethod
-    def LCS_2(path1, path2):
+    def LCS_2(list2, list1):
         """计算最长后缀"""
-        list1 = DataProcessUtils.getSplitFilePath(path1)
-        list2 = DataProcessUtils.getSplitFilePath(path2)
         suf = 0
         length = min(list1.__len__(), list2.__len__())
         for i in range(0, length):
@@ -2442,10 +2440,8 @@ class DataProcessUtils:
         return score
 
     @staticmethod
-    def LCP_2(path1, path2):
+    def LCP_2(list1, list2):
         """计算最长前缀"""
-        list1 = tuple(DataProcessUtils.getSplitFilePath(path1))
-        list2 = tuple(DataProcessUtils.getSplitFilePath(path2))
         pre = 0
         length = min(list1.__len__(), list2.__len__())
         for i in range(0, length):
@@ -2458,13 +2454,10 @@ class DataProcessUtils:
         return pre / max(list1.__len__(), list2.__len__())
 
     @staticmethod
-    def LCSubseq_2(path1, path2):
+    def LCSubseq_2(list1, list2):
         """计算最大公共子字串"""
-        list1 = DataProcessUtils.getSplitFilePath(path1)
-        list2 = DataProcessUtils.getSplitFilePath(path2)
-
-        com = 0
-        dp = [[0 for i in range(0, list2.__len__() + 1)] for i in range(0, list1.__len__() + 1)]
+        # dp = [[0 for i in range(0, list2.__len__() + 1)] for i in range(0, list1.__len__() + 1)]
+        dp = numpy.zeros((list1.__len__() + 1, list2.__len__() + 1))
         for i in range(1, list1.__len__() + 1):
             for j in range(1, list2.__len__() + 1):
                 if list1[i - 1] == list2[j - 1]:
@@ -2477,12 +2470,11 @@ class DataProcessUtils:
         return com / max(list1.__len__(), list2.__len__())
 
     @staticmethod
-    def LCSubstr_2(path1, path2):
+    def LCSubstr_2(list1, list2):
         """计算连续公共子字串"""
-        list1 = DataProcessUtils.getSplitFilePath(path1)
-        list2 = DataProcessUtils.getSplitFilePath(path2)
         com = 0
-        dp = [[0 for i in range(0, list2.__len__() + 1)] for i in range(0, list1.__len__() + 1)]
+        # dp = [[0 for i in range(0, list2.__len__() + 1)] for i in range(0, list1.__len__() + 1)]
+        dp = numpy.zeros((list1.__len__() + 1, list2.__len__() + 1))
         for i in range(1, list1.__len__() + 1):
             for j in range(1, list2.__len__() + 1):
                 if list1[i - 1] == list2[j - 1]:
@@ -2524,6 +2516,10 @@ class DataProcessUtils:
         pullRequestData = pullRequestData.loc[pullRequestData['is_pr'] == 1].copy(deep=True)
 
         if filter_change_trigger:
+            changeTriggerData['label'] = changeTriggerData.apply(
+                lambda x: (x['comment_type'] == 'label_issue_comment' and x['change_trigger'] == 1) or (
+                        x['comment_type'] == 'label_review_comment' and x['change_trigger'] == 0), axis=1)
+            changeTriggerData = changeTriggerData.loc[changeTriggerData['label'] == True].copy(deep=True)
             changeTriggerData = changeTriggerData[['pullrequest_node']].copy(deep=True)
             changeTriggerData.drop_duplicates(inplace=True)
             changeTriggerData.reset_index(inplace=True, drop=True)
@@ -2559,41 +2555,232 @@ class DataProcessUtils:
 
         """(p1, p2, s1)  p1 < p2"""
 
-        cols = ['pr1', 'pr2', 'distance']
-        df_LCS = DataFrame(columns=cols)  # 最长后缀
-        df_LCP = DataFrame(columns=cols)  # 最长前缀
-        df_LCSubseq = DataFrame(columns=cols)  # 最大公共子串
-        df_LCSubstr = DataFrame(columns=cols)  # 连续公共子串
+        list_p1 = []
+        list_p2 = []
+        list_dis_LCS = []
+        list_dis_LCP = []
+        list_dis_LCSubseq = []
+        list_dis_LCSubstr = []
+
+        fileListMap = {}
+        for pr in prList:
+            for f in prFileMap[pr]:
+                if fileListMap.get(f) is None:
+                    fileListMap[f] = tuple(DataProcessUtils.getSplitFilePath(f))
 
         for index, p1 in enumerate(prList):
             print("now:", index, " all:", prList.__len__())
+            files1 = prFileMap[p1]
             for p2 in prList:
                 if p1 < p2:
-                    files1 = prFileMap[p1]
                     files2 = prFileMap[p2]
-
                     score_LCS = 0
                     score_LCSubseq = 0
                     score_LCP = 0
                     score_LCSubstr = 0
-
                     for filename1 in files1:
+                        list1 = fileListMap[filename1]
                         for filename2 in files2:
-                            score_LCS += DataProcessUtils.LCS_2(filename1, filename2)
-                            score_LCSubseq += DataProcessUtils.LCSubseq_2(filename1, filename2)
-                            score_LCP += DataProcessUtils.LCP_2(filename1, filename2)
-                            score_LCSubstr += DataProcessUtils.LCSubstr_2(filename1, filename2)
+                            list2 = fileListMap[filename2]
+                            temp_score_LCSubseq = DataProcessUtils.LCSubseq_2(list1, list2)
+                            score_LCSubseq += temp_score_LCSubseq
+                            if temp_score_LCSubseq != 0:
+                                """如果最长公共子串为0， 其他必然0"""
+                                score_LCS += DataProcessUtils.LCS_2(list1, list2)
+                                score_LCP += DataProcessUtils.LCP_2(list1, list2)
+                                score_LCSubstr += DataProcessUtils.LCSubstr_2(list1, list2)
 
-                    score_LCS /= files1.__len__() * files2.__len__()
-                    score_LCSubseq /= files1.__len__() * files2.__len__()
-                    score_LCP /= files1.__len__() * files2.__len__()
-                    score_LCSubstr /= files1.__len__() * files2.__len__()
+                    total_len = files1.__len__() * files2.__len__()
 
-                    """分数加到dataframe"""
-                    df_LCS = df_LCS.append({'pr1': p1, 'pr2': p2, 'distance': score_LCS}, ignore_index=True)
-                    df_LCSubseq = df_LCSubseq.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubseq}, ignore_index=True)
-                    df_LCP = df_LCP.append({'pr1': p1, 'pr2': p2, 'distance': score_LCP}, ignore_index=True)
-                    df_LCSubstr = df_LCSubstr.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubstr}, ignore_index=True)
+                    score_LCS /= total_len
+                    score_LCSubseq /= total_len
+                    score_LCP /= total_len
+                    score_LCSubstr /= total_len
+
+                    list_p1.append(p1)
+                    list_p2.append(p2)
+                    list_dis_LCS.append(score_LCS)
+                    list_dis_LCP.append(score_LCP)
+                    list_dis_LCSubseq.append(score_LCSubseq)
+                    list_dis_LCSubstr.append(score_LCSubstr)
+
+                    # """分数加到dataframe"""
+                    # df_LCS = df_LCS.append({'pr1': p1, 'pr2': p2, 'distance': score_LCS}, ignore_index=True)
+                    # df_LCSubseq = df_LCSubseq.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubseq}, ignore_index=True)
+                    # df_LCP = df_LCP.append({'pr1': p1, 'pr2': p2, 'distance': score_LCP}, ignore_index=True)
+                    # df_LCSubstr = df_LCSubstr.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubstr}, ignore_index=True
+
+        """初始化df"""
+        df_LCS = DataFrame({'pr1':list_p1, 'pr2':list_p2, 'distance':list_dis_LCS})
+        df_LCP = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCP})
+        df_LCSubseq = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCSubseq})
+        df_LCSubstr = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCSubstr})
+
+
+        targetPath = projectConfig.getPullRequestDistancePath()
+        pandasHelper.writeTSVFile(os.path.join(targetPath, f"pr_distance_{projectName}_LCS.tsv"),
+                                  df_LCS, pandasHelper.STR_WRITE_STYLE_WRITE_TRUNC)
+        pandasHelper.writeTSVFile(os.path.join(targetPath, f"pr_distance_{projectName}_LCSubseq.tsv"),
+                                  df_LCSubseq, pandasHelper.STR_WRITE_STYLE_WRITE_TRUNC)
+        pandasHelper.writeTSVFile(os.path.join(targetPath, f"pr_distance_{projectName}_LCP.tsv"),
+                                  df_LCP, pandasHelper.STR_WRITE_STYLE_WRITE_TRUNC)
+        pandasHelper.writeTSVFile(os.path.join(targetPath, f"pr_distance_{projectName}_LCSubstr.tsv"),
+                                  df_LCSubstr, pandasHelper.STR_WRITE_STYLE_WRITE_TRUNC)
+
+    @staticmethod
+    def caculatePrIRDistance(projectName, date, filter_change_trigger=True):
+        """计算某个项目的某个时间段之内的相似度(y1, m1, y2, m2)"""
+        time1 = datetime.now()
+        pull_request_path = projectConfig.getPullRequestPath()
+        pr_change_file_path = projectConfig.getPRChangeFilePath()
+        change_trigger_path = projectConfig.getPRTimeLineDataPath()
+        minYear, minMonth, maxYear, maxMonth = date
+
+        """pull request 数据库输出 自带抬头"""
+        pullRequestData = pandasHelper.readTSVFile(
+            os.path.join(pull_request_path, f'ALL_{projectName}_data_pullrequest.tsv'),
+            pandasHelper.INT_READ_FILE_WITH_HEAD, low_memory=False
+        )
+
+        """ pr_change_trigger 自带抬头"""
+        changeTriggerData = pandasHelper.readTSVFile(
+            os.path.join(change_trigger_path, f'ALL_{projectName}_data_pr_change_trigger.tsv'),
+            pandasHelper.INT_READ_FILE_WITH_HEAD, low_memory=False
+        )
+
+        pullRequestData = pullRequestData.loc[pullRequestData['is_pr'] == 1].copy(deep=True)
+
+        if filter_change_trigger:
+            changeTriggerData['label'] = changeTriggerData.apply(
+                lambda x: (x['comment_type'] == 'label_issue_comment' and x['change_trigger'] == 1) or (
+                        x['comment_type'] == 'label_review_comment' and x['change_trigger'] == 0), axis =1)
+            changeTriggerData = changeTriggerData.loc[changeTriggerData['label'] == True].copy(deep=True)
+            changeTriggerData = changeTriggerData[['pullrequest_node']].copy(deep=True)
+            changeTriggerData.drop_duplicates(inplace=True)
+            changeTriggerData.reset_index(inplace=True, drop=True)
+            pullRequestData = pandas.merge(pullRequestData, changeTriggerData, left_on='node_id',
+                                           right_on='pullrequest_node')
+
+        pullRequestData['label'] = pullRequestData['created_at'].apply(
+            lambda x: (time.strptime(x, "%Y-%m-%d %H:%M:%S")))
+        pullRequestData['label_y'] = pullRequestData['label'].apply(lambda x: x.tm_year)
+        pullRequestData['label_m'] = pullRequestData['label'].apply(lambda x: x.tm_mon)
+
+        def isInTimeGap(x):
+            d = x['label_y'] * 12 + x['label_m']
+            d1 = minYear * 12 + minMonth
+            d2 = maxYear * 12 + maxMonth
+            return d1 <= d <= d2
+
+        """筛选出目标的pr"""
+        pullRequestData['target'] = pullRequestData.apply(lambda x: isInTimeGap(x), axis=1)
+        pullRequestData = pullRequestData.loc[pullRequestData['target'] == 1]
+        pullRequestData.reset_index(drop=True, inplace=True)
+
+        """(p1, p2, s1)  p1 < p2"""
+
+        list_p1 = []
+        list_p2 = []
+        list_dis_IR = []
+
+        """建立TF-IDF模型"""
+        """先尝试所有信息团在一起"""
+        df = df[['pr_number', 'pr_title', 'pr_body', 'label']].copy(deep=True)
+        df.drop_duplicates(inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+        """用于收集所有文本向量分词"""
+        stopwords = SplitWordHelper().getEnglishStopList()  # 获取通用英语停用词
+
+        textList = []
+        from source.nlp.FleshReadableUtils import FleshReadableUtils
+        for row in df.itertuples(index=False, name='Pandas'):
+            tempList = []
+            """获取pull request的标题"""
+            pr_title = getattr(row, 'pr_title')
+            pr_title_word_list = [x for x in FleshReadableUtils.word_list(pr_title) if x not in stopwords]
+
+            """初步尝试提取词干效果反而下降了 。。。。"""
+
+            """对单词做提取词干"""
+            pr_title_word_list = nltkFunction.stemList(pr_title_word_list)
+            tempList.extend(pr_title_word_list)
+
+            """pull request的body"""
+            pr_body = getattr(row, 'pr_body')
+            pr_body_word_list = [x for x in FleshReadableUtils.word_list(pr_body) if x not in stopwords]
+            """对单词做提取词干"""
+            pr_body_word_list = nltkFunction.stemList(pr_body_word_list)
+            tempList.extend(pr_body_word_list)
+            textList.append(tempList)
+
+        print(textList.__len__())
+        """对分词列表建立字典 并提取特征数"""
+        dictionary = corpora.Dictionary(textList)
+        print('词典：', dictionary)
+
+        feature_cnt = len(dictionary.token2id)
+        print("词典特征数：", feature_cnt)
+
+        """根据词典建立语料库"""
+        corpus = [dictionary.doc2bow(text) for text in textList]
+        # print('语料库:', corpus)
+        """语料库训练TF-IDF模型"""
+        tfidf = models.TfidfModel(corpus)
+
+        """再次遍历数据，形成向量，向量是稀疏矩阵的形式"""
+        wordVectors = []
+        for i in range(0, df.shape[0]):
+            wordVectors.append(dict(tfidf[dictionary.doc2bow(textList[i])]))
+
+        for index, p1 in enumerate(prList):
+            print("now:", index, " all:", prList.__len__())
+            files1 = prFileMap[p1]
+            for p2 in prList:
+                if p1 < p2:
+                    files2 = prFileMap[p2]
+                    score_LCS = 0
+                    score_LCSubseq = 0
+                    score_LCP = 0
+                    score_LCSubstr = 0
+                    for filename1 in files1:
+                        list1 = fileListMap[filename1]
+                        for filename2 in files2:
+                            list2 = fileListMap[filename2]
+                            temp_score_LCSubseq = DataProcessUtils.LCSubseq_2(list1, list2)
+                            score_LCSubseq += temp_score_LCSubseq
+                            if temp_score_LCSubseq != 0:
+                                """如果最长公共子串为0， 其他必然0"""
+                                score_LCS += DataProcessUtils.LCS_2(list1, list2)
+                                score_LCP += DataProcessUtils.LCP_2(list1, list2)
+                                score_LCSubstr += DataProcessUtils.LCSubstr_2(list1, list2)
+
+                    total_len = files1.__len__() * files2.__len__()
+
+                    score_LCS /= total_len
+                    score_LCSubseq /= total_len
+                    score_LCP /= total_len
+                    score_LCSubstr /= total_len
+
+                    list_p1.append(p1)
+                    list_p2.append(p2)
+                    list_dis_LCS.append(score_LCS)
+                    list_dis_LCP.append(score_LCP)
+                    list_dis_LCSubseq.append(score_LCSubseq)
+                    list_dis_LCSubstr.append(score_LCSubstr)
+
+                    # """分数加到dataframe"""
+                    # df_LCS = df_LCS.append({'pr1': p1, 'pr2': p2, 'distance': score_LCS}, ignore_index=True)
+                    # df_LCSubseq = df_LCSubseq.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubseq}, ignore_index=True)
+                    # df_LCP = df_LCP.append({'pr1': p1, 'pr2': p2, 'distance': score_LCP}, ignore_index=True)
+                    # df_LCSubstr = df_LCSubstr.append({'pr1': p1, 'pr2': p2, 'distance': score_LCSubstr}, ignore_index=True
+
+        """初始化df"""
+        df_LCS = DataFrame({'pr1':list_p1, 'pr2':list_p2, 'distance':list_dis_LCS})
+        df_LCP = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCP})
+        df_LCSubseq = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCSubseq})
+        df_LCSubstr = DataFrame({'pr1': list_p1, 'pr2': list_p2, 'distance': list_dis_LCSubstr})
+
 
         targetPath = projectConfig.getPullRequestDistancePath()
         pandasHelper.writeTSVFile(os.path.join(targetPath, f"pr_distance_{projectName}_LCS.tsv"),
