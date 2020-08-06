@@ -772,11 +772,11 @@ class DataProcessUtils:
             data_issue = data_issue.loc[data_issue['isBot'] == False].copy(deep=True)
             data_issue = data_issue[['number', 'node_id_x', 'user_login_y',
                                      'created_at_x', 'commits', 'additions', 'deletions',
-                                     'changed_files', 'head_label', 'base_label', 'user_login_x']].copy(deep=True)
+                                     'changed_files', 'head_label', 'base_label', 'user_login_x', 'created_at_y']].copy(deep=True)
 
             data_issue.columns = ['pr_number', 'node_id_x', 'review_user_login', 'pr_created_at', 'pr_commits',
                                   'pr_additions', 'pr_deletions', 'pr_changed_files', 'pr_head_label',
-                                  'pr_base_label', 'pr_user_login']
+                                  'pr_base_label', 'pr_user_login', 'comment_at']
             data_issue.drop_duplicates(inplace=True)
 
             data_review = pandas.merge(pullRequestData, reviewData, left_on='number', right_on='pull_number')
@@ -792,11 +792,11 @@ class DataProcessUtils:
             data_review = data_review.loc[data_review['isBot'] == False].copy(deep=True)
             data_review = data_review[['number', 'node_id_x', 'user_login_y',
                                        'created_at', 'commits', 'additions', 'deletions',
-                                       'changed_files', 'head_label', 'base_label', 'user_login_x']].copy(deep=True)
+                                       'changed_files', 'head_label', 'base_label', 'user_login_x', 'submitted_at']].copy(deep=True)
 
             data_review.columns = ['pr_number', 'node_id_x', 'review_user_login', 'pr_created_at', 'pr_commits',
                                    'pr_additions', 'pr_deletions', 'pr_changed_files', 'pr_head_label',
-                                   'pr_base_label', 'pr_user_login']
+                                   'pr_base_label', 'pr_user_login', 'comment_at']
             data_review.drop_duplicates(inplace=True)
 
             rawData = pandas.concat([data_issue, data_review], axis=0)  # 0 轴合并
@@ -816,43 +816,46 @@ class DataProcessUtils:
                                               'user_login': "review_user_login"}, inplace=True)
             rawData = pandas.merge(rawData, changeTriggerData, how='inner')
             rawData = rawData.drop(labels='node_id_x', axis=1)
+            rawData.sort_values(['pr_number', 'review_user_login', 'comment_at'], ascending=[True, True,True],
+                                inplace=True)
+            rawData.drop_duplicates(subset=['pr_number', 'review_user_login'], inplace=True, keep='first')
 
             "pr_number, review_user_login, pr_created_at, pr_commits, pr_additions, pr_deletions" \
             "pr_changed_files, pr_head_label, pr_base_label, pr_user_login, author_push_count," \
             "author_review_count, author_submit_gap"
 
-            """尝试添加 作者总共提交次数，作者提交时间间隔，作者review次数的特征"""
-            author_push_count = []
-            author_submit_gap = []
-            author_review_count = []
-            pos = 0
-            for data in rawData.itertuples(index=False):
-                pullNumber = getattr(data, 'pr_number')
-                author = getattr(data, 'pr_user_login')
-                temp = rawData.loc[rawData['pr_user_login'] == author].copy(deep=True)
-                temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
-                push_num = temp['pr_number'].drop_duplicates().shape[0]
-                author_push_count.append(push_num)
-
-                gap = DataProcessUtils.convertStringTimeToTimeStrip(rawData.loc[rawData.shape[0] - 1,
-                                                                                'pr_created_at']) - DataProcessUtils.convertStringTimeToTimeStrip(
-                    rawData.loc[0, 'pr_created_at'])
-                if push_num != 0:
-                    last_num = list(temp['pr_number'])[-1]
-                    this_created_time = getattr(data, 'pr_created_at')
-                    last_created_time = list(rawData.loc[rawData['pr_number'] == last_num]['pr_created_at'])[
-                        0]
-                    gap = int(time.mktime(time.strptime(this_created_time, "%Y-%m-%d %H:%M:%S"))) - int(
-                        time.mktime(time.strptime(last_created_time, "%Y-%m-%d %H:%M:%S")))
-                author_submit_gap.append(gap)
-
-                temp = rawData.loc[rawData['review_user_login'] == author].copy(deep=True)
-                temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
-                review_num = temp.shape[0]
-                author_review_count.append(review_num)
-            rawData['author_push_count'] = author_push_count
-            rawData['author_review_count'] = author_review_count
-            rawData['author_submit_gap'] = author_submit_gap
+            # """尝试添加 作者总共提交次数，作者提交时间间隔，作者review次数的特征"""
+            # author_push_count = []
+            # author_submit_gap = []
+            # author_review_count = []
+            # pos = 0
+            # for data in rawData.itertuples(index=False):
+            #     pullNumber = getattr(data, 'pr_number')
+            #     author = getattr(data, 'pr_user_login')
+            #     temp = rawData.loc[rawData['pr_user_login'] == author].copy(deep=True)
+            #     temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
+            #     push_num = temp['pr_number'].drop_duplicates().shape[0]
+            #     author_push_count.append(push_num)
+            #
+            #     gap = DataProcessUtils.convertStringTimeToTimeStrip(rawData.loc[rawData.shape[0] - 1,
+            #                                                                     'pr_created_at']) - DataProcessUtils.convertStringTimeToTimeStrip(
+            #         rawData.loc[0, 'pr_created_at'])
+            #     if push_num != 0:
+            #         last_num = list(temp['pr_number'])[-1]
+            #         this_created_time = getattr(data, 'pr_created_at')
+            #         last_created_time = list(rawData.loc[rawData['pr_number'] == last_num]['pr_created_at'])[
+            #             0]
+            #         gap = int(time.mktime(time.strptime(this_created_time, "%Y-%m-%d %H:%M:%S"))) - int(
+            #             time.mktime(time.strptime(last_created_time, "%Y-%m-%d %H:%M:%S")))
+            #     author_submit_gap.append(gap)
+            #
+            #     temp = rawData.loc[rawData['review_user_login'] == author].copy(deep=True)
+            #     temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
+            #     review_num = temp.shape[0]
+            #     author_review_count.append(review_num)
+            # rawData['author_push_count'] = author_push_count
+            # rawData['author_review_count'] = author_review_count
+            # rawData['author_submit_gap'] = author_submit_gap
             data = rawData
 
         """按照时间分成小片"""
@@ -2418,6 +2421,46 @@ class DataProcessUtils:
         #                           , pandasHelper.STR_WRITE_STYLE_WRITE_TRUNC)
         data.to_excel(f'recommendList_{key}.xls', encoding='utf-8', index=False, header=True)
 
+    @staticmethod
+    def getUserListFromData(projectName):
+        """ 从某个项目提取涉及的用户
+        """
+
+        issue_comment_path = projectConfig.getIssueCommentPath()
+        pull_request_path = projectConfig.getPullRequestPath()
+        review_path = projectConfig.getReviewDataPath()
+        change_trigger_path = projectConfig.getPRTimeLineDataPath()
+
+        """issue commit 数据库输出 自带抬头"""
+        issueCommentData = pandasHelper.readTSVFile(
+            os.path.join(issue_comment_path, f'ALL_{projectName}_data_issuecomment.tsv'),
+            pandasHelper.INT_READ_FILE_WITH_HEAD, low_memory=False
+        )
+
+        """pull request 数据库输出 自带抬头"""
+        pullRequestData = pandasHelper.readTSVFile(
+            os.path.join(pull_request_path, f'ALL_{projectName}_data_pullrequest.tsv'),
+            pandasHelper.INT_READ_FILE_WITH_HEAD, low_memory=False
+        )
+
+        """ review 数据库输出 自带抬头"""
+        reviewData = pandasHelper.readTSVFile(
+            os.path.join(review_path, f'ALL_{projectName}_data_review.tsv'),
+            pandasHelper.INT_READ_FILE_WITH_HEAD, low_memory=False
+        )
+
+        userList = []
+        """收集涉及用户"""
+        pullRequestData = pullRequestData.loc[pullRequestData['is_pr'] == 1].copy(deep=True)
+
+        userList.extend(list(pullRequestData['user_login']))
+        userList.extend(list(issueCommentData['user_login']))
+        userList.extend(list(reviewData['user_login']))
+        userList = list(set(userList))
+        userList = [x for x in userList if isinstance(x, str)]
+        return userList
+
+
 
 if __name__ == '__main__':
     # DataProcessUtils.splitDataByMonth(projectConfig.getRootPath() + r'\data\train\ALL_rails_data.tsv',
@@ -2442,10 +2485,11 @@ if __name__ == '__main__':
     # DataProcessUtils.contactPBData(p, label=StringKeyUtils.STR_LABEL_ALL_COMMENT)
     # DataProcessUtils.getReviewerFrequencyDict(p, (2018, 1, 2019, 12))
 
-    # projects = ['opencv', 'adobe', 'angular', 'bitcoin', 'cakephp']
-    # projects = ['bitcoin']
+    # projects = ['opencv', 'cakephp', 'react', 'akka', 'django']
+    # # projects = ['bitcoin']
     # for p in projects:
     #     DataProcessUtils.contactMLData(p, label=StringKeyUtils.STR_LABEL_ALL_COMMENT)
+    DataProcessUtils.getUserListFromData("opencv")
 
     # DataProcessUtils.contactMLData('xbmc')
     # DataProcessUtils.contactFPSData('cakephp', label=StringKeyUtils.STR_LABEL_ALL_COMMENT)
@@ -2460,4 +2504,4 @@ if __name__ == '__main__':
     #
     # DataProcessUtils.contactCNData("opencv", filter_change_trigger=True)
     # DataProcessUtils.contactGAData('opencv', filter_change_trigger=False, label=StringKeyUtils.STR_LABEL_ALL_COMMENT)
-    DataProcessUtils.contactHGData("opencv", filter_change_trigger=True)
+    # DataProcessUtils.contactHGData("opencv", filter_change_trigger=True)

@@ -331,7 +331,7 @@ class MLTrain:
             return train_data, train_data_y, test_data, test_data_y
 
     @staticmethod
-    def preProcess(df, date, project, featureType, isSTD=False, isNOR=False):
+    def preProcess(df, date, project, featureType, isSTD=False, isNOR=False, m=3):
         """参数说明
          df：读取的dataframe对象
          testDate:作为测试的年月 (year,month)
@@ -343,10 +343,46 @@ class MLTrain:
         df.dropna(axis=0, how='any', inplace=True)
         print("after fliter na:", df.shape)
 
+        # """df数据增加author_review_count, author_submit_count, author_submit_gap"""
+        # """尝试添加 作者总共提交次数，作者提交时间间隔，作者review次数的特征"""
+        # author_push_count = []
+        # author_submit_gap = []
+        # author_review_count = []
+        # pos = 0
+        # for data in df.itertuples(index=False):
+        #     pullNumber = getattr(data, 'pr_number')
+        #     author = getattr(data, 'pr_user_login')
+        #     temp = df.loc[df['pr_user_login'] == author].copy(deep=True)
+        #     temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
+        #     push_num = temp['pr_number'].drop_duplicates().shape[0]
+        #     author_push_count.append(push_num)
+        #
+        #     gap = DataProcessUtils.convertStringTimeToTimeStrip(df.loc[df.shape[0] - 1,
+        #                                                                'pr_created_at']) - DataProcessUtils.convertStringTimeToTimeStrip(
+        #         df.loc[0, 'pr_created_at'])
+        #     if push_num != 0:
+        #         last_num = list(temp['pr_number'])[-1]
+        #         this_created_time = getattr(data, 'pr_created_at')
+        #         last_created_time = list(df.loc[df['pr_number'] == last_num]['pr_created_at'])[
+        #             0]
+        #         gap = int(time.mktime(time.strptime(this_created_time, "%Y-%m-%d %H:%M:%S"))) - int(
+        #             time.mktime(time.strptime(last_created_time, "%Y-%m-%d %H:%M:%S")))
+        #     author_submit_gap.append(gap)
+        #
+        #     temp = df.loc[df['review_user_login'] == author].copy(deep=True)
+        #     temp = temp.loc[temp['pr_number'] < pullNumber].copy(deep=True)
+        #     review_num = temp.shape[0]
+        #     author_review_count.append(review_num)
+        # df['author_push_count'] = author_push_count
+        # df['author_review_count'] = author_review_count
+        # df['author_submit_gap'] = author_submit_gap
+
         """对df添加一列标识训练集和测试集"""
         df['label'] = df['pr_created_at'].apply(
             lambda x: (time.strptime(x, "%Y-%m-%d %H:%M:%S").tm_year == date[2] and
                        time.strptime(x, "%Y-%m-%d %H:%M:%S").tm_mon == date[3]))
+        df['label_y'] = df['pr_created_at'].apply(lambda x: time.strptime(x, "%Y-%m-%d %H:%M:%S").tm_year)
+        df['label_m'] = df['pr_created_at'].apply(lambda x: time.strptime(x, "%Y-%m-%d %H:%M:%S").tm_mon)
         df.reset_index(drop=True, inplace=True)
 
         # """在现有的特征中添加文本路径特征"""
@@ -355,6 +391,7 @@ class MLTrain:
            append 函数必须在表明label后面使用"""
 
         if featureType == 1 or featureType == 3:
+            """添加File Path Features"""
             df = appendFilePathFeatureVector(df, project, date, 'pr_number')
         """在现有的特征中添加pr标题和内容文本特征"""
         if featureType == 2 or featureType == 3:
@@ -382,6 +419,11 @@ class MLTrain:
         # # # 画出参与人数的频度图
         # MLTrain.getSeriesBarPlot(df['review_user_login'])
 
+        def isInTimeGap(x, m, maxYear, maxMonth):
+            d = x['label_y'] * 12 + x['label_m']
+            d2 = maxYear * 12 + maxMonth
+            return d >= d2 - m
+
         """对人名字做数字处理"""
         """频率不过的评审者在编号之前就已经过滤了，不用考虑分类不连续的情况"""
         """这里reviewer_user_login 放在 第一个否则会影响candicateNum这个变量在后面的引用"""
@@ -389,6 +431,155 @@ class MLTrain:
         print(df.shape)
         candicateNum = max(df.loc[df['label'] == 0]['review_user_login'])
         print("candicate Num:", candicateNum)
+
+        """计算contributor set"""
+        contribute_list = list(set(df.loc[df['label'] == 1]['pr_user_login']))
+        reviewer_list = list(set(df.loc[df['label'] == 0]['review_user_login']))
+
+        """添加Relation ship Features"""
+        """对 train set和test set的处理方式稍微不同   train set数据统计依照之前pr
+           而训练集的统计数据只限制于trianset
+        """
+
+        """Prior Evaluation  reviewer cm 之前 review co的次数
+           Recent Evaluation reviewer cm 在 m 个月 reivew co的次数
+        """
+        prior_evaluation = {}
+        recent_evaluation = {}
+        for reviewer in reviewer_list:
+            prior_evaluation[reviewer] = []
+            recent_evaluation[reviewer] = []
+        for data in df.itertuples(index=False):
+            pullNumber = getattr(data, 'pr_number')
+            author = getattr(data, 'pr_user_login')
+            label = getattr(data, 'label')
+            label_m = getattr(data, 'label_m')
+            label_y = getattr(data, 'label_y')
+            temp = None
+            if label == 0:
+                temp = df.loc[df['pr_number'] < pullNumber].copy(deep=True)
+            else:
+                temp = df.loc[df['label'] == 0].copy(deep=True)
+            temp = temp.loc[df['pr_user_login'] == author].copy(deep=True)
+            """依次遍历每个候选者统计"""
+            prior_evaluation_dict = dict(temp['review_user_login'].value_counts())
+            for r in reviewer_list:
+                prior_evaluation[r].append(prior_evaluation_dict.get(r, 0))
+            """temp 二次过滤  选m个月以内的"""
+            if temp.shape[0] > 0:
+                if label == 0:
+                    temp['target'] = temp.apply(lambda x: isInTimeGap(x, m, label_y, label_m), axis=1)
+                else:
+                     temp['target'] = temp.apply(lambda x: isInTimeGap(x, m, date[2], date[3]), axis=1)
+                temp = temp.loc[temp['target'] == 1]
+            """依次遍历每个候选者统计"""
+            recent_evaluation_dict = dict(temp['review_user_login'].value_counts())
+            for r in reviewer_list:
+                recent_evaluation[r].append(recent_evaluation_dict.get(r, 0))
+
+        """添加"""
+        for r in reviewer_list:
+            df[f'prior_evaluation_{r}'] = prior_evaluation[r]
+            df[f'recent_evaluation_{r}'] = recent_evaluation[r]
+
+        # 开始时间：数据集开始时间的前一天
+        start_time = time.strptime(str(date[0]) + "-" + str(date[1]) + "-" + "01 00:00:00", "%Y-%m-%d %H:%M:%S")
+        start_time = int(time.mktime(start_time) - 86400)
+        # 结束时间：数据集的最后一天
+        end_time = time.strptime(str(date[2]) + "-" + str(date[3]) + "-" + "01 00:00:00", "%Y-%m-%d %H:%M:%S")
+        end_time = int(time.mktime(end_time) - 1)
+
+        """Activeness Feature 添加"""
+        total_pulls = {}   # 项目有的所有pr
+        evaluate_pulls = {}  # co 之前review的数量
+        recent_pulls = {}  # co 最近m月 review的数量
+        evaluate_time = {}  # co 平均回应时间
+        last_time = {}  # co 最后一次reivew 的时间间隔
+        first_time = {}  # co 第一次review的时间间隔
+        for reviewer in reviewer_list:
+            total_pulls[reviewer] = []
+            evaluate_pulls[reviewer] = []
+            recent_pulls[reviewer] = []
+            evaluate_time[reviewer] = []
+            last_time[reviewer] = []
+            first_time[reviewer] = []
+        count = 0
+        for data in df.itertuples(index=False):
+            print("count:", count)
+            count += 1
+            pullNumber = getattr(data, 'pr_number')
+            author = getattr(data, 'pr_user_login')
+            label = getattr(data, 'label')
+            label_m = getattr(data, 'label_m')
+            label_y = getattr(data, 'label_y')
+            temp = None
+            if label == 0:
+                temp = df.loc[df['pr_number'] < pullNumber]
+            else:
+                temp = df.loc[df['label'] == 0]
+            """依次遍历每个候选者统计"""
+            total_pull_number = list(set(temp['pr_number'])).__len__()
+            res_reviewer_list = reviewer_list.copy()
+
+            groups = dict(list(temp.groupby('review_user_login')))
+            """先遍历有tempDf的reviewer"""
+            for r, tempDf in groups.items():
+                total_pulls[r].append(total_pull_number)
+                res_reviewer_list.remove(r)
+                # tempDf = temp.loc[temp['review_user_login'] == r].copy(deep=True)
+                evaluate_pulls[r].append(tempDf.shape[0])
+                if tempDf.shape[0] == 0:
+                    """没有历史 认为age=0， 间隔是最大间隔"""
+                    first_time[r].append(0)
+                    last_time[r].append(end_time - start_time)
+                else:
+                    pr_created_time_list = tempDf['pr_created_at'].apply(
+                        lambda x: time.mktime(time.strptime(x, "%Y-%m-%d %H:%M:%S")))
+                    first_review_time = min(pr_created_time_list.to_list())
+                    last_review_time = max(pr_created_time_list.to_list())
+                    first_time[r].append(end_time - first_review_time)
+                    last_time[r].append(end_time - last_review_time)
+
+                """平均回应时间统计"""
+                if tempDf.shape[0] > 0:
+                    evaluate_avg = 0
+                    for df_row in tempDf.itertuples(index=False):
+                        temp_pr_create_time = time.mktime(time.strptime(getattr(df_row, 'pr_created_at'),
+                                                                        "%Y-%m-%d %H:%M:%S"))
+                        temp_review_create_time = time.mktime(time.strptime(getattr(df_row, 'comment_at'),
+                                                                            "%Y-%m-%d %H:%M:%S"))
+                        evaluate_avg += temp_review_create_time - temp_pr_create_time
+                    evaluate_avg /= tempDf.shape[0]
+                else:
+                    evaluate_avg = end_time - start_time
+                evaluate_time[r].append(evaluate_avg)
+
+                """统计近期 review 次数"""
+                """temp 二次过滤  选m个月以内的"""
+                if tempDf.shape[0] > 0:
+                    if label == 0:
+                        tempDf['target'] = tempDf.apply(lambda x: isInTimeGap(x, m, label_y, label_m), axis=1)
+                    else:
+                        tempDf['target'] = tempDf.apply(lambda x: isInTimeGap(x, m, date[2], date[3]), axis=1)
+                    tempDf = tempDf.loc[tempDf['target'] == 1].copy(deep=True)
+                recent_evaluation[r].append(tempDf.shape[0])
+
+            for r in res_reviewer_list:
+                total_pulls[r].append(total_pull_number)
+                evaluate_pulls[r].append(0)
+                first_time[r].append(0)
+                last_time[r].append(end_time - start_time)
+                evaluate_avg = end_time - start_time
+                evaluate_time[r].append(evaluate_avg)
+                recent_evaluation[r].append(0)
+
+        """Activeness Feature增加到 dataframe"""
+        for r in reviewer_list:
+            df[f'total_pulls_{r}'] = total_pulls[r]
+            df[f'evaluation_pulls_{r}'] = evaluate_pulls[r]
+            df[f'first_time_{r}'] = first_time[r]
+            df[f'last_time_{r}'] = last_time[r]
+            df[f'recent_evaluation_{r}'] = recent_evaluation[r]
 
         """对branch做处理  舍弃base,head做拆分 并数字化"""
         df.drop(axis=1, columns=['pr_base_label'], inplace=True)  # inplace 代表直接数据上面
@@ -699,5 +890,5 @@ if __name__ == '__main__':
     dates = [(2017, 1, 2018, 1), (2017, 1, 2018, 2), (2017, 1, 2018, 3), (2017, 1, 2018, 4), (2017, 1, 2018, 5),
              (2017, 1, 2018, 6), (2017, 1, 2018, 7), (2017, 1, 2018, 8), (2017, 1, 2018, 9), (2017, 1, 2018, 10),
              (2017, 1, 2018, 11), (2017, 1, 2018, 12)]
-    projects = ['opencv', 'cakephp', 'yarn', 'akka', 'django', 'react']
+    projects = ['opencv']
     MLTrain.testMLAlgorithmsByMultipleLabels(projects, dates, [0])

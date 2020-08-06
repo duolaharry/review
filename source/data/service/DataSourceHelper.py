@@ -713,16 +713,16 @@ def appendFilePathFeatureVector(inputDf, projectName, date, pull_number_name):
 
     # tempData.drop(columns=['pr_number'], inplace=True)
 
-    """PCA 做缩减"""
-    pca = PCA(n_components=0.95)
-    tempData_train = pca.fit_transform(tempData_train)
-    print("after pca :", tempData_train.shape)
-    print(pca.explained_variance_ratio_)
-    tempData_train = pandas.DataFrame(tempData_train)
-
-    tempData_test = pca.transform(tempData_test)
-    print("after pca :", tempData_train.shape)
-    tempData_test = pandas.DataFrame(tempData_test)
+    # """PCA 做缩减"""
+    # pca = PCA(n_components=0.95)
+    # tempData_train = pca.fit_transform(tempData_train)
+    # print("after pca :", tempData_train.shape)
+    # print(pca.explained_variance_ratio_)
+    # tempData_train = pandas.DataFrame(tempData_train)
+    #
+    # tempData_test = pca.transform(tempData_test)
+    # print("after pca :", tempData_train.shape)
+    # tempData_test = pandas.DataFrame(tempData_test)
 
     tempData = pandas.concat([tempData_train, tempData_test], axis=0)
     tempData.reset_index(drop=True, inplace=True)

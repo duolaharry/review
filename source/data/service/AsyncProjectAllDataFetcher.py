@@ -263,6 +263,21 @@ class AsyncProjectAllDataFetcher:
         print('cost time:', datetime.now() - t1)
 
     @staticmethod
+    def getUserFollowList(userList):
+        # 获取 给定的用户列表中的用户的 follow 列表
+        t1 = datetime.now()
+
+        statistic = statisticsHelper()
+        statistic.startTime = t1
+
+        loop = asyncio.get_event_loop()
+        task = [asyncio.ensure_future(AsyncProjectAllDataFetcher.preProcessUserFollowList(loop, statistic, userList))]
+        tasks = asyncio.gather(*task)
+        loop.run_until_complete(tasks)
+
+        print('cost time:', datetime.now() - t1)
+
+    @staticmethod
     def getUnmatchedCommitFile():
         # 获取 数据库中没有获得file的 commit点，一次最多2000个
         t1 = datetime.now()
@@ -351,6 +366,19 @@ class AsyncProjectAllDataFetcher:
 
         tasks = [asyncio.ensure_future(AsyncApiHelper.downloadCommits(item[0], item[1], semaphore, mysql, statistic))
                  for item in res]  # 可以通过nodes 过多次嵌套节省请求数量
+        await asyncio.wait(tasks)
+
+    @staticmethod
+    async def preProcessUserFollowList(loop, statistic, userList):
+
+        semaphore = asyncio.Semaphore(configPraser.getSemaphore())  # 对速度做出限制
+        mysql = await getMysqlObj(loop)
+
+        if configPraser.getPrintMode():
+            print("mysql init success")
+
+        tasks = [asyncio.ensure_future(AsyncApiHelper.downloadUserFollowList(login, semaphore, mysql, statistic))
+                 for login in userList]  # 可以通过nodes 过多次嵌套节省请求数量
         await asyncio.wait(tasks)
 
     @staticmethod
@@ -583,4 +611,8 @@ if __name__ == '__main__':
     # pandasHelper.writeTSVFile(target_filename, df)
 
     # 全量获取pr change_trigger信息，写入prTimeData文件夹
-    AsyncProjectAllDataFetcher.getPRChangeTriggerData(owner=configPraser.getOwner(), repo=configPraser.getRepo())
+    # AsyncProjectAllDataFetcher.getPRChangeTriggerData(owner=configPraser.getOwner(), repo=configPraser.getRepo())
+    from source.scikit.service.DataProcessUtils import DataProcessUtils
+    userList = ['yiran-THU']
+    # userList = DataProcessUtils.getUserListFromData("opencv")
+    AsyncProjectAllDataFetcher.getUserFollowList(userList)
